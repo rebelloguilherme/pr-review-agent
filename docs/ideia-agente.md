@@ -58,5 +58,8 @@ diff de cada arquivo alterado — uma ação real de chamada a API, não simulad
 
 ## Modelo de linguagem
 
-Claude (Anthropic), via `langchain-anthropic`, chamado no nó `analyze_files`
-para gerar a análise de cada diff.
+Claude Haiku 4.5 (Anthropic), acessado via [OpenRouter](https://openrouter.ai)
+com `langchain-openai` (`ChatOpenAI` apontado para a base URL da OpenRouter),
+chamado no nó `analyze_files` para gerar a análise de cada diff. A troca para
+OpenRouter foi uma decisão de custo/billing — mesma família de modelo Claude,
+cobrança via créditos da OpenRouter em vez da conta Anthropic direta.
