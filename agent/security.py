@@ -27,10 +27,6 @@ import os
 import re
 
 _INJECTION_PATTERNS = [
-    re.compile(
-        r"(ignore|disregard)\s+(all\s+|every\s+|previous\s+|prior\s+|above\s+)*instructions\b",
-        re.IGNORECASE,
-    ),
     re.compile(r"ignore\s+(todas\s+)?as\s+instruções", re.IGNORECASE),
     re.compile(r"desconsidere\s+(todas\s+)?as\s+instruções", re.IGNORECASE),
     re.compile(r"system\s*prompt", re.IGNORECASE),
