@@ -30,5 +30,6 @@ env/
 
 # Logs / outputs
 *.log
+!docs/evidencias/**/*.log
 .pytest_cache/
 logs/
