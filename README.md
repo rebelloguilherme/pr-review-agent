@@ -24,26 +24,40 @@ uma primeira passada automatizada antes da revisão humana.
 
 ## Fluxo (LangGraph)
 
+> Este projeto evoluiu a partir do Mini-Projeto do Módulo 1 (M1S05_06). A
+> base — grafo com `fetch_pr`, roteamento condicional e a tool do GitHub —
+> foi mantida; o Módulo 2 adicionou **paralelização real**, **memória**,
+> **governança/segurança**, **observabilidade**, **QA com IA**, **CI/CD com
+> detecção de anomalias** e **automação low-code**. Ver seção
+> [Evolução M1 → M2](#evolução-m1--m2) para o detalhamento completo.
+
 ```mermaid
 flowchart LR
     START((start)) --> fetch_pr
-    fetch_pr -->|PR ok| analyze_files
     fetch_pr -->|erro| handle_error
-    analyze_files --> generate_report
+    fetch_pr -->|"PR ok (fan-out via Send,\n1 por arquivo)"| analyze_one_file
+    analyze_one_file -->|"join\n(todas as branches)"| generate_report
     generate_report --> END((end))
     handle_error --> END
 ```
 
 Estado compartilhado entre os nós (`agent/state.py`): `owner`, `repo`,
-`pr_number`, `pr_info`, `files`, `file_analyses` (acumulado a cada arquivo
-analisado), `report`, `error`.
+`pr_number`, `pr_info`, `files`, `file_analyses` (com reducer
+`operator.add`, para agregar os retornos das execuções paralelas),
+`report`, `error`.
 
 | Nó | O que faz |
 |---|---|
 | `fetch_pr` | Valida a entrada, chama a API do GitHub, busca metadata do PR e o diff de cada arquivo alterado. Se faltar token, o PR não existir ou for inacessível, marca `error` no estado. |
-| `analyze_files` | Para cada arquivo alterado, envia o diff ao LLM pedindo uma análise objetiva (bugs prováveis, riscos, sugestões). Os resultados vão se acumulando em `file_analyses` — é o "contexto/memória" do agente durante a execução. |
-| `generate_report` | Consolida `pr_info` + `file_analyses` num relatório Markdown final. |
+| `route_after_fetch` (aresta condicional) | Erro → `handle_error`. Sucesso → despacha `Send("analyze_one_file", {...})` **1 por arquivo alterado (até `MAX_FILES`), em paralelo real** — não é um `for` sequencial nem `asyncio.gather` escondido dentro de 1 nó só. |
+| `analyze_one_file` | Executa em paralelo (até `MAX_CONCURRENCY=2` simultâneas, ver [Decisões tomadas](#decisões-tomadas)); analisa 1 único arquivo com o LLM. O LangGraph faz o *join* automático — só segue para `generate_report` quando todas as execuções paralelas terminarem. |
+| `generate_report` | Consolida `pr_info` + `file_analyses` (agregado das execuções paralelas) num relatório Markdown final. |
 | `handle_error` | Nó alternativo, acionado pela aresta condicional quando `fetch_pr` marca um erro; devolve uma mensagem clara em vez de quebrar a execução. |
+
+O grafo é compilado com `checkpointer=MemorySaver()` e cada execução usa
+`thread_id = "{owner}/{repo}#{pr_number}"` — permite inspecionar/retomar o
+estado de uma revisão específica (ver seção
+[Contexto e memória](#contexto-e-memória)).
 
 ## Ferramenta integrada
 
@@ -145,6 +159,21 @@ O relatório completo gerado nesse teste está em
 - **Limite de arquivos analisados (`MAX_FILES = 25`)** e de tamanho do
   diff por arquivo (`MAX_PATCH_CHARS = 6000`): evita custo/tempo
   descontrolado em PRs muito grandes.
+- **Paralelização via `Send` do LangGraph, não `asyncio.gather`**: optamos
+  por despachar 1 nó `analyze_one_file` por arquivo (fan-out real no grafo)
+  em vez de manter 1 nó só chamando `asyncio.gather` internamente. É mais
+  código, mas o paralelismo fica visível na estrutura do grafo (e no
+  diagrama), não escondido dentro da implementação de 1 nó — mais fácil de
+  auditar e de explicar em revisão.
+- **`MAX_CONCURRENCY = 2`** (limite de execuções paralelas simultâneas,
+  configurado no `main.py`): a conta usada na OpenRouter está no *free
+  tier* (sem créditos adicionados), que tem um orçamento de requisições
+  *in-flight* bem baixo. Testamos com `MAX_CONCURRENCY = 5` contra um PR
+  real de 23 arquivos e recebemos `402 in_flight_budget_exhausted` da
+  OpenRouter em várias análises simultâneas — reduzir para 2 tornou as
+  execuções consistentemente limpas. Isso também acabou virando evidência
+  real (não simulada) do fallback descrito em
+  [Observabilidade e resiliência](#observabilidade-e-resiliência).
 
 ## Limitações
 
@@ -155,4 +184,8 @@ O relatório completo gerado nesse teste está em
   uma vez, apenas do diff de cada arquivo + o resumo geral do PR.
 - Não posta comentários de volta no GitHub — o resultado fica só no
   relatório local (Markdown no terminal ou em arquivo).
-- Sem testes automatizados (fora do escopo do mini-projeto).
+- A ordem dos arquivos no relatório final segue a ordem de conclusão das
+  análises paralelas, não necessariamente a ordem original do diff do PR
+  (efeito esperado do fan-out paralelo via `Send`).
+- Sem testes automatizados (fora do escopo do mini-projeto — adicionados no
+  M2, ver [QA com IA](#qa-observabilidade-e-devops)).

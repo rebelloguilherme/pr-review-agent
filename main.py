@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 
 from agent.graph import build_graph
 
+MAX_CONCURRENCY = 2
+
 
 def parse_pr_ref(ref: str, number: str | None) -> tuple[str, str, int]:
     if ref.startswith("http"):
@@ -49,7 +51,18 @@ def main() -> None:
         "report": None,
         "error": None,
     }
-    result = graph.invoke(initial_state)
+    # thread_id = número do PR: cada PR analisado vira uma "sessão"
+    # separada no checkpointer, permitindo inspecionar/retomar a execução.
+    # max_concurrency limita quantos nós `analyze_one_file` rodam ao mesmo
+    # tempo — sem isso, um PR com muitos arquivos dispara 1 chamada LLM
+    # simultânea por arquivo e pode estourar limites de rate/orçamento do
+    # provedor (visto na prática: erro 402 "in_flight_budget_exhausted" da
+    # OpenRouter ao testar contra um PR com 23 arquivos).
+    config = {
+        "configurable": {"thread_id": f"{owner}/{repo}#{pr_number}"},
+        "max_concurrency": MAX_CONCURRENCY,
+    }
+    result = graph.invoke(initial_state, config=config)
     report = result["report"]
     print(report)
 

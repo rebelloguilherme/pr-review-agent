@@ -1,9 +1,16 @@
 import os
 
 from langchain_openai import ChatOpenAI
+from langgraph.types import Send
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from .github_tool import GitHubAPIError, fetch_pr_files, fetch_pr_metadata
-from .state import PRReviewState
+from .state import FileAnalysisInput, PRReviewState
 
 MAX_PATCH_CHARS = 6000
 MAX_FILES = 25
@@ -63,36 +70,75 @@ def fetch_pr(state: PRReviewState) -> dict:
     return {"pr_info": pr_info, "files": files}
 
 
-def route_after_fetch(state: PRReviewState) -> str:
-    return "handle_error" if state.get("error") else "analyze_files"
+def route_after_fetch(state: PRReviewState) -> str | list[Send]:
+    """Aresta condicional: erro -> handle_error; sucesso -> fan-out paralelo.
+
+    Em vez de um único nó que itera os arquivos sequencialmente, despachamos
+    um `Send("analyze_one_file", ...)` por arquivo (até MAX_FILES). O
+    LangGraph executa essas invocações em paralelo (mesmo "superstep") e só
+    segue para o próximo nó ligado a `analyze_one_file` (generate_report)
+    quando todas terminarem — é a paralelização real exigida pelo grafo,
+    não uma paralelização escondida dentro de um `for`/`asyncio.gather`.
+    """
+    if state.get("error"):
+        return "handle_error"
+
+    files = state["files"][:MAX_FILES]
+    if not files:
+        return "handle_error"
+
+    return [
+        Send("analyze_one_file", {"filename": f["filename"], "patch": f.get("patch")})
+        for f in files
+    ]
 
 
-def analyze_files(state: PRReviewState) -> dict:
-    llm = ChatOpenAI(
-        model=OPENROUTER_MODEL,
-        base_url=OPENROUTER_BASE_URL,
-        api_key=os.environ["OPENROUTER_API_KEY"],
-        temperature=0,
-        max_tokens=1024,
-    )
-    analyses = []
-    for f in state["files"][:MAX_FILES]:
-        patch = f.get("patch")
-        if not patch:
-            analyses.append(
+_llm = None
+
+
+def _get_llm() -> ChatOpenAI:
+    global _llm
+    if _llm is None:
+        _llm = ChatOpenAI(
+            model=OPENROUTER_MODEL,
+            base_url=OPENROUTER_BASE_URL,
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            temperature=0,
+            max_tokens=1024,
+        )
+    return _llm
+
+
+@retry(
+    retry=retry_if_exception_type(Exception),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=15),
+    reraise=True,
+)
+def _invoke_llm_with_retry(prompt: str) -> str:
+    response = _get_llm().invoke(prompt)
+    return response.content if isinstance(response.content, str) else str(response.content)
+
+
+def analyze_one_file(state: FileAnalysisInput) -> dict:
+    """Analisa 1 único arquivo. Executado em paralelo, 1x por arquivo do PR
+    (despachado via `Send` em `route_after_fetch`)."""
+    filename, patch = state["filename"], state.get("patch")
+    if not patch:
+        return {
+            "file_analyses": [
                 {
-                    "filename": f["filename"],
+                    "filename": filename,
                     "analysis": "Sem diff textual disponível (arquivo binário ou muito grande).",
                 }
-            )
-            continue
-        prompt = _ANALYSIS_PROMPT.format(
-            filename=f["filename"], patch=patch[:MAX_PATCH_CHARS]
-        )
-        response = llm.invoke(prompt)
-        content = response.content if isinstance(response.content, str) else str(response.content)
-        analyses.append({"filename": f["filename"], "analysis": content})
-    return {"file_analyses": analyses}
+            ]
+        }
+    prompt = _ANALYSIS_PROMPT.format(filename=filename, patch=patch[:MAX_PATCH_CHARS])
+    try:
+        content = _invoke_llm_with_retry(prompt)
+    except Exception as exc:  # noqa: BLE001 — fallback deliberado: 1 falha não derruba o PR inteiro
+        content = f"Análise indisponível para este arquivo após novas tentativas (erro: {exc})."
+    return {"file_analyses": [{"filename": filename, "analysis": content}]}
 
 
 def generate_report(state: PRReviewState) -> dict:
