@@ -1,0 +1,4 @@
+{"timestamp": "2026-08-31T20:24:55.294213+00:00", "trace_id": "rebelloguilherme/pr-review-agent#3", "event": "prompt_injection_detected", "location": "file_diff", "filename": "README.md"}
+{"timestamp": "2026-08-31T20:25:10.239521+00:00", "trace_id": "rebelloguilherme/pr-review-agent#3", "event": "prompt_injection_detected", "location": "file_diff", "filename": "agent/security.py"}
+{"timestamp": "2026-08-31T20:25:23.871823+00:00", "trace_id": "rebelloguilherme/pr-review-agent#3", "event": "prompt_injection_detected", "location": "file_diff", "filename": "tests/test_security.py"}
+{"timestamp": "2026-08-31T20:25:23.879380+00:00", "trace_id": "rebelloguilherme/pr-review-agent#3", "event": "comment_blocked", "reason": "prompt_injection_detected", "approved": false}

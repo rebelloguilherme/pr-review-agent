@@ -1,4 +1,5 @@
-from typing import Optional, TypedDict
+import operator
+from typing import Annotated, TypedDict
 
 
 class FileChange(TypedDict):
@@ -6,7 +7,7 @@ class FileChange(TypedDict):
     status: str
     additions: int
     deletions: int
-    patch: Optional[str]
+    patch: str | None
 
 
 class FileAnalysis(TypedDict):
@@ -27,8 +28,40 @@ class PRReviewState(TypedDict):
     owner: str
     repo: str
     pr_number: int
-    pr_info: Optional[PRInfo]
+    pr_info: PRInfo | None
     files: list[FileChange]
-    file_analyses: list[FileAnalysis]
-    report: Optional[str]
-    error: Optional[str]
+    # Annotated com operator.add: cada branch paralela de analyze_one_file
+    # devolve uma lista de 1 item; LangGraph concatena (reduce) os retornos
+    # das execuções paralelas em vez de sobrescrever o campo.
+    file_analyses: Annotated[list[FileAnalysis], operator.add]
+    report: str | None
+    error: str | None
+
+    # --- Governança (ver agent/nodes.py::post_comment) ---
+    # Entrada: aprovação humana explícita (flag --approve da CLI) para a
+    # única ação de escrita do agente (publicar comentário no PR).
+    approved: bool
+    # Annotated com operator.or_: fetch_pr checa a descrição do PR e cada
+    # analyze_one_file checa o próprio diff; uma vez True, permanece True
+    # pelo resto da execução (ver agent/security.py).
+    injection_detected: Annotated[bool, operator.or_]
+    comment_posted: bool
+    comment_url: str | None
+    governance_note: str | None
+
+
+class FileAnalysisInput(TypedDict):
+    """Estado de entrada de cada execução paralela de `analyze_one_file`.
+
+    É um subconjunto de `PRReviewState` — cada `Send` despacha uma cópia
+    disto (um arquivo por vez) em paralelo. Inclui owner/repo/pr_number
+    só para compor o mesmo `trace_id` usado no resto da execução nos logs
+    (ver `agent/observability.py`) — o nó em si não usa esses campos para
+    nenhuma outra decisão.
+    """
+
+    filename: str
+    patch: str | None
+    owner: str
+    repo: str
+    pr_number: int
