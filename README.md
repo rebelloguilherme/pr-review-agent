@@ -2,7 +2,13 @@
 
 Agente de revisão de Pull Requests do GitHub, implementado com [LangGraph](https://langchain-ai.github.io/langgraph/).
 
-> Projeto avaliativo — módulo "IA para Desenvolvedores" (Mini-Projeto M1S05_06).
+> Projeto avaliativo — módulo "IA para Desenvolvedores". Começou como o
+> Mini-Projeto do Módulo 1 (M1S05_06) e foi evoluído para o Projeto
+> Avaliativo do Módulo 2 (M2.2), mantendo o grafo base (fetch → analisa →
+> relatório) e adicionando paralelização real, memória/RAG, governança
+> com bloqueio de prompt injection, observabilidade, testes, pipeline
+> CI/CD com detecção de anomalia e automação low-code. Ver
+> [Evolução M1 → M2](#evolução-m1--m2) para o mapeamento completo.
 
 ## Problema
 
@@ -21,6 +27,30 @@ uma primeira passada automatizada antes da revisão humana.
 - **Entrada:** `owner/repo` + número do PR, ou a URL completa do PR.
 - **Saída:** relatório estruturado em Markdown com resumo do PR, análise por
   arquivo e uma conclusão geral.
+
+## Classificação da solução
+
+**Sistema híbrido**, com o controle de fluxo majoritariamente
+determinístico e o LLM usado como etapa de geração de conteúdo dentro de
+nós fixos — não um agente autônomo que escolhe dinamicamente suas
+próprias ferramentas ou próximos passos.
+
+Concretamente:
+
+- **Determinístico (regras de código, não decisão do modelo)**: a
+  topologia do grafo, a rota de erro (`route_after_fetch`), o fan-out
+  paralelo por arquivo, a detecção de prompt injection
+  (`detect_prompt_injection`, regex) e — mais importante — **a decisão
+  de publicar ou não o comentário no PR** (`post_comment`), que nunca
+  depende do texto que o LLM produziu.
+- **Não determinístico (decisão do modelo)**: o conteúdo da análise de
+  cada arquivo (quais bugs/riscos apontar, texto do relatório).
+
+Essa separação explícita entre "o que o código decide" e "o que o modelo
+decide" é deliberada — é o que torna o guardrail de segurança confiável
+(ver [Segurança e governança](#segurança-e-governança)): mesmo que o
+modelo seja manipulado por um PR malicioso, ele não tem nenhum caminho de
+código até uma ação real.
 
 ## Fluxo (LangGraph)
 
@@ -408,11 +438,59 @@ Causa raiz real (não hipotética): esgotamento progressivo do saldo *free tier*
 - A ordem dos arquivos no relatório final segue a ordem de conclusão das
   análises paralelas, não necessariamente a ordem original do diff do PR
   (efeito esperado do fan-out paralelo via `Send`).
-- Sem testes automatizados (fora do escopo do mini-projeto — adicionados no
-  M2, ver [QA com IA](#qa-observabilidade-e-devops)).
 - A conta de desenvolvimento na OpenRouter é *free tier*, com orçamento de
   créditos e de requisições *in-flight* baixo — durante o desenvolvimento
   do M2 esse saldo se esgotou após testes repetidos, e chamadas passaram a
   falhar com `402` mesmo de forma serializada. O fallback por arquivo
   evita que isso derrube a execução inteira, mas em produção seria
   necessário um plano pago ou outro provedor.
+
+## Evolução M1 → M2
+
+| Capacidade | Origem |
+|---|---|
+| Grafo LangGraph (fetch → analisa → relatório), tool GitHub, tratamento de erro | Mini-Projeto M1 (mantido) |
+| Paralelização real por arquivo (`Send`), checkpointer | Novo no M2 |
+| RAG sobre guia de boas práticas, memória de execução | Novo no M2 |
+| Ação de escrita (comentário no PR) com aprovação humana, bloqueio de prompt injection, redação de segredos | Novo no M2 |
+| Logs estruturados + trilha de auditoria correlacionados | Novo no M2 |
+| Testes automatizados (unidade + E2E), code review com IA | Novo no M2 |
+| Pipeline CI/CD, detecção de anomalia real, estimativa de risco | Novo no M2 |
+| Automação low-code/no-code | Novo no M2 |
+
+## Automação low-code/no-code
+
+_Em construção — ver [issue/PR de acompanhamento] para o status atual._
+
+## Análise crítica e refinamento
+
+**Ciclo de refinamento documentado**: durante a implementação de retry
+para chamadas à API do GitHub (`agent/github_tool.py`), o teste
+`tests/test_github_tool.py::test_fetch_pr_metadata_retries_on_500_then_succeeds`
+pegou um bug real — a checagem de status HTTP transitório (429/5xx)
+tinha sido escrita *fora* da função decorada com `@retry`, então o
+mecanismo de retry nunca era efetivamente acionado por códigos de erro
+do servidor, só por exceções de rede (timeout/conexão). **Problema
+observado**: um teste que deveria passar (retry bem-sucedido após 2
+falhas 500) falhava porque a 1ª resposta 500 já propagava como erro
+definitivo. **Alteração realizada**: movida a checagem de status para
+dentro de `_get`/`_post` (as funções realmente decoradas com `@retry`),
+documentada em `_raise_if_transient`. **Resultado**: os 28 testes passam
+de forma determinística; validamos com uma regressão proposital real no
+CI (não simulada) — ver
+[`docs/evidencias/ci-logs/`](docs/evidencias/ci-logs/) e a seção
+[QA, observabilidade e DevOps](#qa-observabilidade-e-devops).
+
+**Principais limitações** — ver seção [Limitações](#limitações) para a
+lista completa; os pontos mais relevantes são o detector de prompt
+injection ser baseado em padrões (com falso positivo real documentado) e
+a dependência de saldo de uma conta LLM externa.
+
+**Possibilidades de evolução**: RAG com embeddings persistidos em disco
+(hoje recalculados a cada processo); extrair a seção `FAILURES` dos logs
+de CI em vez de truncar por posição (ver limitação do
+`explain_ci_logs.py`); publicar comentários incrementais por arquivo em
+vez de 1 comentário único; suporte a outros provedores de LLM além da
+OpenRouter.
+
+**Vídeo de demonstração**: `[link a adicionar após a gravação]`
