@@ -17,6 +17,7 @@ from .github_tool import (
     fetch_pr_metadata,
     post_pr_comment,
 )
+from .low_code import notify_low_code
 from .memory import retrieve_relevant_guidelines
 from .observability import get_logger
 from .rate_limit import openrouter_semaphore
@@ -295,6 +296,25 @@ def post_comment(state: PRReviewState) -> dict:
     qualquer guardrail de segurança tiver disparado (`injection_detected`).
     A decisão de publicar NUNCA vem do texto que o LLM produziu — só do
     estado controlado pela aplicação."""
+    result = _decide_and_post_comment(state)
+    notify_low_code(
+        _trace_id(state),
+        {
+            "owner": state.get("owner"),
+            "repo": state.get("repo"),
+            "pr_number": state.get("pr_number"),
+            "pr_title": (state.get("pr_info") or {}).get("title"),
+            "files_analyzed": len(state.get("file_analyses", [])),
+            "injection_detected": bool(state.get("injection_detected")),
+            "comment_posted": result.get("comment_posted", False),
+            "comment_url": result.get("comment_url"),
+            "governance_note": result.get("governance_note"),
+        },
+    )
+    return result
+
+
+def _decide_and_post_comment(state: PRReviewState) -> dict:
     trace_id = _trace_id(state)
     log = get_logger(trace_id)
 
