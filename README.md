@@ -285,6 +285,31 @@ Comportamento esperado e testado (`tests/test_security.py`):
 
 **Bug real encontrado por um teste durante o desenvolvimento**: o primeiro rascunho do retry em `agent/github_tool.py` verificava status HTTP transitório (429/5xx) *fora* da função decorada com `@retry`, então o retry nunca era efetivamente acionado por esses códigos — só por exceções de rede. `tests/test_github_tool.py::test_fetch_pr_metadata_retries_on_500_then_succeeds` pegou isso antes de virar um problema em produção; a correção moveu a checagem para dentro de `_get`/`_post` (ver comentário em `agent/github_tool.py::_raise_if_transient`).
 
+### Pipeline (CI/CD)
+
+`.github/workflows/ci.yml`: `lint` (ruff) → `test` (pytest, 28 casos) → `build` (`docker build`). Roda em push/PR para `main`/`develop`. Como todos os testes usam GitHub, LLM e RAG mockados, o pipeline **não precisa de nenhum secret configurado** no repositório — reduz superfície de exposição de credenciais.
+
+### Anomalia real detectada e explicada com IA
+
+Para gerar uma anomalia real (não simulada) em vez de inventar uma, removemos de propósito 1 padrão de `agent/security.py`, empurramos, deixamos o CI falhar de verdade, capturamos o log, revertemos e capturamos o log do pipeline voltando ao verde — evidências completas em [`docs/evidencias/ci-logs/`](docs/evidencias/ci-logs/).
+
+`scripts/explain_ci_logs.py` manda os dois logs reais (falha + recuperação) pro LLM numa única chamada e pede uma explicação em português — saída completa em [`docs/evidencias/explicacao-logs-ci.md`](docs/evidencias/explicacao-logs-ci.md). **Nota de transparência**: o modelo identificou a causa raiz corretamente em termos gerais (regressão revertida no mecanismo de detecção/retry), mas errou o nome exato do teste que falhou — o log foi truncado (`MAX_CHARS_PER_LOG`) antes da seção `FAILURES` completa, e o modelo inferiu a partir de nomes de teste parecidos que apareceram antes do corte. Mantivemos a saída sem editar, porque é um limite real e instrutivo da abordagem (ver [Limitações](#limitações)).
+
+### Estimativa de tendência de risco
+
+`scripts/estimate_risk.py` lê os relatórios reais em `docs/evidencias/*.md` e calcula a taxa de fallback (análises que caíram no fallback do LLM ÷ total de arquivos) por execução, comparando a primeira metade das execuções com a segunda. Resultado real (não simulado), salvo em [`docs/evidencias/estimativa-risco.txt`](docs/evidencias/estimativa-risco.txt):
+
+```
+pr1-paralelo-com-fallback.md      | 23 arquivos | 7 fallbacks  | 30%
+pr1-paralelo-execucao-limpa.md    | 23 arquivos | 6 fallbacks  | 26%
+pr3-observabilidade-com-falso-positivo.md | 14 arquivos | 13 fallbacks | 93%
+
+Tendência: CRESCENTE — risco de falha aumentando entre execuções
+Risco ATUAL: ALTO
+```
+
+Causa raiz real (não hipotética): esgotamento progressivo do saldo *free tier* da conta de desenvolvimento na OpenRouter ao longo dos testes deste projeto (ver decisão sobre `max_tokens`/semáforo em [Decisões tomadas](#decisões-tomadas)).
+
 ## Decisões tomadas
 
 - **LangGraph com 4 nós** em vez de uma cadeia linear, para poder desviar
@@ -352,6 +377,17 @@ Comportamento esperado e testado (`tests/test_security.py`):
 
 ## Limitações
 
+- `scripts/explain_ci_logs.py` trunca cada log em `MAX_CHARS_PER_LOG`
+  (3000 caracteres) antes de mandar pro LLM — numa execução real, isso
+  cortou o log antes da seção `FAILURES` completa, e o modelo acabou
+  citando o nome errado do teste que falhou (a causa raiz geral, porém,
+  estava correta). Ver nota de transparência em
+  [QA, observabilidade e DevOps](#qa-observabilidade-e-devops). Correção
+  futura óbvia: extrair especificamente a seção `FAILURES`/`ERRORS` do
+  log em vez de truncar por posição.
+- `scripts/estimate_risk.py` é uma heurística simples (taxa de fallback),
+  não uma análise estatística robusta — com só 3 execuções registradas,
+  qualquer tendência é indicativa, não conclusiva.
 - Não analisa arquivos binários ou diffs muito grandes (GitHub não retorna
   `patch` nesses casos) — o agente apenas sinaliza isso no relatório.
 - PRs com mais de 25 arquivos alterados só têm os 25 primeiros analisados.

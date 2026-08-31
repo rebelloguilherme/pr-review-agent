@@ -1,0 +1,8 @@
+Execução                                        | Arquivos | Fallbacks | Taxa
+-------------------------------------------------------------------------------------
+pr1-paralelo-com-fallback.md                     |       23 |         7 |   30%
+pr1-paralelo-execucao-limpa.md                   |       23 |         6 |   26%
+pr3-observabilidade-com-falso-positivo.md        |       14 |        13 |   93%
+
+Tendência (1ª metade das execuções vs. 2ª metade): CRESCENTE — risco de falha aumentando entre execuções
+Risco ATUAL: ALTO — mais da metade das análises da execução mais recente caíram em fallback. Causa raiz identificada: saldo esgotado do free tier da OpenRouter (ver README, 'Limitações').
