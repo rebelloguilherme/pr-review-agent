@@ -472,6 +472,9 @@ aplicação; o n8n só recebe o resultado pronto e o encaminha.
   `agent/low_code.py`).
 - Passo a passo completo de reprodução e exportação do workflow:
   [`low-code/README.md`](low-code/README.md).
+- Workflow publicado e testado de verdade (não simulado) em n8n Cloud —
+  evidência real da execução em
+  [`low-code/evidencias/teste-real.md`](low-code/evidencias/teste-real.md).
 - Chamada best-effort e não bloqueante: uma falha ao notificar o n8n é só
   logada (`low_code.failed`), nunca derruba a execução principal — a
   revisão do PR já terminou nesse ponto.
@@ -507,4 +510,9 @@ de CI em vez de truncar por posição (ver limitação do
 vez de 1 comentário único; suporte a outros provedores de LLM além da
 OpenRouter.
 
-**Vídeo de demonstração**: `[link a adicionar após a gravação]`
+**Vídeo de demonstração**: não entregue nesta submissão — decisão
+consciente diante do prazo (evolução do M1 para o M2 foi concentrada
+numa janela de tempo curta; ver histórico de commits/PRs). Prioridade
+dada aos artefatos técnicos (código, testes, pipeline, evidências reais
+em `docs/evidencias/`), que cobrem a mesma demonstração que o vídeo
+apresentaria.
