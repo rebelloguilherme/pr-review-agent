@@ -44,6 +44,14 @@ def _get(url: str, token: str, params: dict | None = None) -> requests.Response:
         raise GitHubTransientError(f"Falha de rede ao chamar {url}: {exc}") from exc
 
 
+@_retrying()
+def _post(url: str, token: str, json_body: dict) -> requests.Response:
+    try:
+        return requests.post(url, headers=_headers(token), json=json_body, timeout=REQUEST_TIMEOUT)
+    except (requests.Timeout, requests.ConnectionError) as exc:
+        raise GitHubTransientError(f"Falha de rede ao chamar {url}: {exc}") from exc
+
+
 def fetch_pr_metadata(owner: str, repo: str, pr_number: int, token: str) -> dict:
     url = f"{GITHUB_API_URL}/repos/{owner}/{repo}/pulls/{pr_number}"
     resp = _get(url, token)
@@ -81,3 +89,19 @@ def fetch_pr_files(owner: str, repo: str, pr_number: int, token: str) -> list[di
             break
         page += 1
     return files
+
+
+def post_pr_comment(owner: str, repo: str, pr_number: int, body: str, token: str) -> str:
+    """Publica um comentário no PR. Ação real, pública e não trivial de
+    desfazer — só deve ser chamada depois dos guardrails de governança
+    (ver `agent/nodes.py::post_comment`), nunca diretamente a partir de
+    uma decisão do LLM."""
+    url = f"{GITHUB_API_URL}/repos/{owner}/{repo}/issues/{pr_number}/comments"
+    resp = _post(url, token, {"body": body})
+    if resp.status_code == 429 or resp.status_code >= 500:
+        raise GitHubTransientError(f"GitHub retornou HTTP {resp.status_code}, tentando de novo.")
+    if not resp.ok:
+        raise GitHubAPIError(
+            f"Erro ao publicar comentário: HTTP {resp.status_code} - {resp.text[:200]}"
+        )
+    return resp.json().get("html_url", "")

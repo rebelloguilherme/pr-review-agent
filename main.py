@@ -32,6 +32,15 @@ def main() -> None:
     parser.add_argument("pr", help="owner/repo ou URL completa do PR")
     parser.add_argument("number", nargs="?", help="Número do PR (se não usar URL)")
     parser.add_argument("--output", "-o", help="Arquivo para salvar o relatório em Markdown")
+    parser.add_argument(
+        "--approve",
+        action="store_true",
+        help=(
+            "Aprova a publicação do relatório como comentário no PR (ação real, "
+            "pública). Sem esta flag, o agente roda em modo dry-run: gera o "
+            "relatório mas não publica nada."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -50,6 +59,11 @@ def main() -> None:
         "file_analyses": [],
         "report": None,
         "error": None,
+        "approved": args.approve,
+        "injection_detected": False,
+        "comment_posted": False,
+        "comment_url": None,
+        "governance_note": None,
     }
     # thread_id = número do PR: cada PR analisado vira uma "sessão"
     # separada no checkpointer, permitindo inspecionar/retomar a execução.
@@ -65,6 +79,9 @@ def main() -> None:
     result = graph.invoke(initial_state, config=config)
     report = result["report"]
     print(report)
+
+    if result.get("governance_note"):
+        print(f"\n[governança] {result['governance_note']}", file=sys.stderr)
 
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:

@@ -37,6 +37,18 @@ class PRReviewState(TypedDict):
     report: str | None
     error: str | None
 
+    # --- Governança (ver agent/nodes.py::post_comment) ---
+    # Entrada: aprovação humana explícita (flag --approve da CLI) para a
+    # única ação de escrita do agente (publicar comentário no PR).
+    approved: bool
+    # Annotated com operator.or_: fetch_pr checa a descrição do PR e cada
+    # analyze_one_file checa o próprio diff; uma vez True, permanece True
+    # pelo resto da execução (ver agent/security.py).
+    injection_detected: Annotated[bool, operator.or_]
+    comment_posted: bool
+    comment_url: str | None
+    governance_note: str | None
+
 
 class FileAnalysisInput(TypedDict):
     """Estado de entrada de cada execução paralela de `analyze_one_file`.

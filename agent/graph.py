@@ -6,6 +6,7 @@ from .nodes import (
     fetch_pr,
     generate_report,
     handle_error,
+    post_comment,
     route_after_fetch,
 )
 from .state import PRReviewState
@@ -16,6 +17,7 @@ def build_graph():
     builder.add_node("fetch_pr", fetch_pr)
     builder.add_node("analyze_one_file", analyze_one_file)
     builder.add_node("generate_report", generate_report)
+    builder.add_node("post_comment", post_comment)
     builder.add_node("handle_error", handle_error)
 
     builder.add_edge(START, "fetch_pr")
@@ -30,7 +32,11 @@ def build_graph():
         {"handle_error": "handle_error"},
     )
     builder.add_edge("analyze_one_file", "generate_report")
-    builder.add_edge("generate_report", END)
+    # post_comment é a única ação de escrita do grafo (comentário público no
+    # PR) — sempre roda depois do relatório pronto, mas só publica de fato
+    # se aprovado e sem injection detectado (ver agent/nodes.py::post_comment).
+    builder.add_edge("generate_report", "post_comment")
+    builder.add_edge("post_comment", END)
     builder.add_edge("handle_error", END)
 
     # Checkpointer em memória: permite inspecionar/retomar uma execução por
