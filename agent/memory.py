@@ -46,16 +46,26 @@ class Chunk:
 _index: list[Chunk] | None = None
 _index_lock = threading.Lock()
 _embeddings_client: OpenAIEmbeddings | None = None
+_embeddings_client_lock = threading.Lock()
 
 
 def _get_embeddings_client() -> OpenAIEmbeddings:
+    """Lazy singleton, protegido por lock: `analyze_one_file` roda em
+    paralelo (via Send) e cada branch pode chamar isto quase ao mesmo
+    tempo na primeira execução. Sem o lock, duas threads podiam checar
+    `_embeddings_client is None` como True simultaneamente e cada uma
+    instanciar seu próprio `OpenAIEmbeddings` — não corrompe nada, mas
+    desperdiça a criação do client. Achado numa revisão de código com IA
+    sobre este mesmo arquivo (ver docs/qa/code-review-memoria-rag.md)."""
     global _embeddings_client
     if _embeddings_client is None:
-        _embeddings_client = OpenAIEmbeddings(
-            model=EMBEDDING_MODEL,
-            base_url=OPENROUTER_BASE_URL,
-            api_key=os.environ["OPENROUTER_API_KEY"],
-        )
+        with _embeddings_client_lock:
+            if _embeddings_client is None:
+                _embeddings_client = OpenAIEmbeddings(
+                    model=EMBEDDING_MODEL,
+                    base_url=OPENROUTER_BASE_URL,
+                    api_key=os.environ["OPENROUTER_API_KEY"],
+                )
     return _embeddings_client
 
 
