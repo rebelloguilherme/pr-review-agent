@@ -460,7 +460,21 @@ Causa raiz real (não hipotética): esgotamento progressivo do saldo *free tier*
 
 ## Automação low-code/no-code
 
-_Em construção — ver [issue/PR de acompanhamento] para o status atual._
+Fluxo em [n8n](https://n8n.io/): **Webhook (gatilho)** → **Discord (saída
+observável)**. `agent/low_code.py::notify_low_code` chama o webhook ao
+final de cada execução (nó `post_comment`, ver `agent/nodes.py`) com um
+resumo em JSON — PR, arquivos analisados, se houve prompt injection, se o
+comentário foi publicado. A lógica de revisão continua inteira na
+aplicação; o n8n só recebe o resultado pronto e o encaminha.
+
+- Configuração: variável `N8N_WEBHOOK_URL` no `.env` (opcional — sem
+  ela, o agente roda normalmente e só pula a notificação, ver
+  `agent/low_code.py`).
+- Passo a passo completo de reprodução e exportação do workflow:
+  [`low-code/README.md`](low-code/README.md).
+- Chamada best-effort e não bloqueante: uma falha ao notificar o n8n é só
+  logada (`low_code.failed`), nunca derruba a execução principal — a
+  revisão do PR já terminou nesse ponto.
 
 ## Análise crítica e refinamento
 
