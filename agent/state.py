@@ -54,8 +54,14 @@ class FileAnalysisInput(TypedDict):
     """Estado de entrada de cada execução paralela de `analyze_one_file`.
 
     É um subconjunto de `PRReviewState` — cada `Send` despacha uma cópia
-    disto (um arquivo por vez) em paralelo.
+    disto (um arquivo por vez) em paralelo. Inclui owner/repo/pr_number
+    só para compor o mesmo `trace_id` usado no resto da execução nos logs
+    (ver `agent/observability.py`) — o nó em si não usa esses campos para
+    nenhuma outra decisão.
     """
 
     filename: str
     patch: str | None
+    owner: str
+    repo: str
+    pr_number: int
