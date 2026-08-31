@@ -141,6 +141,34 @@ depende do LLM "optar" por ignorar a instrução maliciosa:
 Ver também a limitação sobre a cobertura desse detector em
 [Limitações](#limitações).
 
+## Observabilidade e resiliência
+
+Dois sinais correlacionados pelo mesmo `trace_id`
+(`"{owner}/{repo}#{pr_number}"` — o mesmo identificador usado como
+`thread_id` do checkpointer do grafo), com propósitos deliberadamente
+diferentes:
+
+| Sinal | Onde | Propósito | Exemplo de evento |
+|---|---|---|---|
+| **Logs estruturados** (`agent/observability.py`, JSON, 1 por linha) | `logs/agent.jsonl` | Operacional: início/fim de cada nó, latência, erros, retries — para debugar performance e falhas | `analyze_one_file.success` com `latency_ms` |
+| **Trilha de auditoria** (`agent/audit.py`, JSON, 1 por linha) | `logs/audit.jsonl` | Governança: só decisões que importam para "quem autorizou o quê" | `comment_blocked` com `reason` |
+
+**Investigação de uma execução real**: em
+[`docs/evidencias/investigacao-pr3.md`](docs/evidencias/investigacao-pr3.md)
+usamos os dois sinais juntos para explicar por que o agente bloqueou a
+publicação de um comentário ao analisar seu próprio PR de governança — os
+logs mostram *que* aconteceu e quando; a auditoria mostra *por quê* (e em
+quais arquivos). Achamos, na prática, um falso positivo real e
+interessante do detector de prompt injection (ver
+[Limitações](#limitações)).
+
+**Tratamento de falhas**: chamadas ao LLM e à API do GitHub têm timeout
+(15s) e retry com backoff exponencial (até 3 tentativas, `tenacity`); se
+a análise de 1 arquivo continuar falhando depois das tentativas, o
+resultado é um fallback textual (`"Análise indisponível..."`) em vez de
+derrubar a execução inteira — ver evidência real em
+[`docs/evidencias/pr1-paralelo-com-fallback.md`](docs/evidencias/pr1-paralelo-com-fallback.md).
+
 ## Modelo de linguagem
 
 Claude Haiku 4.5 (Anthropic), acessado via [OpenRouter](https://openrouter.ai)
@@ -298,6 +326,13 @@ Comportamento esperado e testado (`tests/test_security.py`):
   review legítima), não para uma pessoa apressada clicar "aprovar" sem
   perceber o alerta de segurança. Quem quiser publicar mesmo assim tem
   que fazer isso manualmente fora do agente.
+- **Logs e auditoria em arquivos separados, não um só**: dava para
+  colocar tudo (performance + governança) num único `agent.jsonl`.
+  Separamos porque as perguntas que cada um responde são diferentes — "o
+  sistema está lento/com erro?" (logs) vs. "quem autorizou essa ação e
+  por quê?" (auditoria) — e times de operação e de segurança/compliance
+  tipicamente não querem vasculhar o mesmo arquivo ruidoso para achar a
+  resposta de uma pergunta de governança.
 
 ## Limitações
 
@@ -310,6 +345,14 @@ Comportamento esperado e testado (`tests/test_security.py`):
   classificador — cobre os vetores mais comuns em texto livre, mas não é
   uma defesa completa contra qualquer variação (ex.: injection ofuscada
   com encoding, ou em outro idioma não coberto pelos padrões).
+- **Falso positivo real e documentado**: ao rodar o agente contra o
+  próprio PR que introduziu o guardrail de injection (`#3`), 3 arquivos
+  foram sinalizados como contendo injection — porque o diff deles contém
+  literalmente os textos de exemplo/teste usados para *detectar*
+  injection, não uma tentativa de ataque de verdade. É uma limitação
+  esperada de um detector baseado em padrões de texto, sem entendimento
+  semântico. Investigação completa em
+  [`docs/evidencias/investigacao-pr3.md`](docs/evidencias/investigacao-pr3.md).
 - A ordem dos arquivos no relatório final segue a ordem de conclusão das
   análises paralelas, não necessariamente a ordem original do diff do PR
   (efeito esperado do fan-out paralelo via `Send`).

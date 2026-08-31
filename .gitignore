@@ -31,3 +31,4 @@ env/
 # Logs / outputs
 *.log
 .pytest_cache/
+logs/

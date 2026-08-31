@@ -1,4 +1,5 @@
 import os
+import time
 
 from langchain_openai import ChatOpenAI
 from langgraph.types import Send
@@ -9,6 +10,7 @@ from tenacity import (
     wait_exponential,
 )
 
+from .audit import record_audit_event
 from .github_tool import (
     GitHubAPIError,
     fetch_pr_files,
@@ -16,9 +18,14 @@ from .github_tool import (
     post_pr_comment,
 )
 from .memory import retrieve_relevant_guidelines
+from .observability import get_logger
 from .rate_limit import openrouter_semaphore
 from .security import detect_prompt_injection, redact_secrets
 from .state import FileAnalysisInput, PRReviewState
+
+
+def _trace_id(state: dict) -> str:
+    return f"{state.get('owner', '?')}/{state.get('repo', '?')}#{state.get('pr_number', '?')}"
 
 MAX_PATCH_CHARS = 6000
 MAX_FILES = 25
@@ -55,19 +62,32 @@ Trechos do guia de boas práticas do time, relevantes para este arquivo \
 
 def fetch_pr(state: PRReviewState) -> dict:
     owner, repo, pr_number = state["owner"], state["repo"], state["pr_number"]
+    trace_id = _trace_id(state)
+    log = get_logger(trace_id)
+    started = time.perf_counter()
+    log.info("fetch_pr.start", owner=owner, repo=repo, pr_number=pr_number)
+
     if not owner or not repo or not pr_number:
+        log.error("fetch_pr.invalid_input")
         return {"error": "Entrada inválida: informe owner, repo e número do PR."}
 
     token = os.environ.get("GITHUB_TOKEN")
     if not token:
+        log.error("fetch_pr.missing_config", missing="GITHUB_TOKEN")
         return {"error": "GITHUB_TOKEN não configurado no .env."}
     if not os.environ.get("OPENROUTER_API_KEY"):
+        log.error("fetch_pr.missing_config", missing="OPENROUTER_API_KEY")
         return {"error": "OPENROUTER_API_KEY não configurado no .env."}
 
     try:
         pr_data = fetch_pr_metadata(owner, repo, pr_number, token)
         files_data = fetch_pr_files(owner, repo, pr_number, token)
     except GitHubAPIError as exc:
+        log.error(
+            "fetch_pr.github_error",
+            error=str(exc),
+            latency_ms=round((time.perf_counter() - started) * 1000, 1),
+        )
         return {"error": str(exc)}
 
     pr_info = {
@@ -92,6 +112,15 @@ def fetch_pr(state: PRReviewState) -> dict:
     injection = detect_prompt_injection(pr_info["title"]) or detect_prompt_injection(
         pr_info["description"]
     )
+    log.info(
+        "fetch_pr.success",
+        files_count=len(files),
+        injection_in_description=injection,
+        latency_ms=round((time.perf_counter() - started) * 1000, 1),
+    )
+    if injection:
+        record_audit_event(trace_id, "prompt_injection_detected", location="pr_description")
+
     result: dict = {"pr_info": pr_info, "files": files}
     if injection:
         result["injection_detected"] = True
@@ -116,7 +145,16 @@ def route_after_fetch(state: PRReviewState) -> str | list[Send]:
         return "handle_error"
 
     return [
-        Send("analyze_one_file", {"filename": f["filename"], "patch": f.get("patch")})
+        Send(
+            "analyze_one_file",
+            {
+                "filename": f["filename"],
+                "patch": f.get("patch"),
+                "owner": state["owner"],
+                "repo": state["repo"],
+                "pr_number": state["pr_number"],
+            },
+        )
         for f in files
     ]
 
@@ -153,7 +191,13 @@ def analyze_one_file(state: FileAnalysisInput) -> dict:
     """Analisa 1 único arquivo. Executado em paralelo, 1x por arquivo do PR
     (despachado via `Send` em `route_after_fetch`)."""
     filename, patch = state["filename"], state.get("patch")
+    trace_id = _trace_id(state)
+    log = get_logger(trace_id)
+    started = time.perf_counter()
+    log.info("analyze_one_file.start", filename=filename)
+
     if not patch:
+        log.info("analyze_one_file.skipped_no_patch", filename=filename)
         return {
             "file_analyses": [
                 {
@@ -173,8 +217,20 @@ def analyze_one_file(state: FileAnalysisInput) -> dict:
     )
     try:
         content = _invoke_llm_with_retry(prompt)
+        log.info(
+            "analyze_one_file.success",
+            filename=filename,
+            latency_ms=round((time.perf_counter() - started) * 1000, 1),
+            used_guidelines=bool(relevant),
+        )
     except Exception as exc:  # noqa: BLE001 — fallback deliberado: 1 falha não derruba o PR inteiro
         content = f"Análise indisponível para este arquivo após novas tentativas (erro: {exc})."
+        log.warning(
+            "analyze_one_file.fallback",
+            filename=filename,
+            error=str(exc)[:300],
+            latency_ms=round((time.perf_counter() - started) * 1000, 1),
+        )
 
     content = redact_secrets(content)
     result: dict = {"file_analyses": [{"filename": filename, "analysis": content}]}
@@ -185,10 +241,16 @@ def analyze_one_file(state: FileAnalysisInput) -> dict:
             "guardrail determinístico, não depende do LLM). Análise do modelo, "
             f"mantida para referência:\n\n{content}"
         )
+        log.warning("analyze_one_file.injection_detected", filename=filename)
+        record_audit_event(
+            trace_id, "prompt_injection_detected", location="file_diff", filename=filename
+        )
     return result
 
 
 def generate_report(state: PRReviewState) -> dict:
+    log = get_logger(_trace_id(state))
+    log.info("generate_report.start", files_analyzed=len(state["file_analyses"]))
     pr_info = state["pr_info"]
     lines = [
         f"# Revisão do PR: {pr_info['title']}",
@@ -233,7 +295,14 @@ def post_comment(state: PRReviewState) -> dict:
     qualquer guardrail de segurança tiver disparado (`injection_detected`).
     A decisão de publicar NUNCA vem do texto que o LLM produziu — só do
     estado controlado pela aplicação."""
+    trace_id = _trace_id(state)
+    log = get_logger(trace_id)
+
     if state.get("injection_detected"):
+        log.warning("post_comment.blocked_injection")
+        record_audit_event(
+            trace_id, "comment_blocked", reason="prompt_injection_detected", approved=state.get("approved", False)
+        )
         return {
             "comment_posted": False,
             "governance_note": (
@@ -242,6 +311,8 @@ def post_comment(state: PRReviewState) -> dict:
             ),
         }
     if not state.get("approved"):
+        log.info("post_comment.dry_run")
+        record_audit_event(trace_id, "comment_skipped", reason="not_approved")
         return {
             "comment_posted": False,
             "governance_note": (
@@ -256,10 +327,14 @@ def post_comment(state: PRReviewState) -> dict:
             state["owner"], state["repo"], state["pr_number"], state["report"], token
         )
     except GitHubAPIError as exc:
+        log.error("post_comment.github_error", error=str(exc))
+        record_audit_event(trace_id, "comment_failed", error=str(exc))
         return {
             "comment_posted": False,
             "governance_note": f"Falha ao publicar comentário: {exc}",
         }
+    log.info("post_comment.published", url=url)
+    record_audit_event(trace_id, "comment_published", url=url, approved_by="cli_flag")
     return {
         "comment_posted": True,
         "comment_url": url,
@@ -268,4 +343,5 @@ def post_comment(state: PRReviewState) -> dict:
 
 
 def handle_error(state: PRReviewState) -> dict:
+    get_logger(_trace_id(state)).error("handle_error", error=state.get("error"))
     return {"report": f"# Erro ao revisar PR\n\n{state['error']}"}
