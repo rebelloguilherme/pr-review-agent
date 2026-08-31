@@ -10,6 +10,8 @@ from tenacity import (
 )
 
 from .github_tool import GitHubAPIError, fetch_pr_files, fetch_pr_metadata
+from .memory import retrieve_relevant_guidelines
+from .rate_limit import openrouter_semaphore
 from .state import FileAnalysisInput, PRReviewState
 
 MAX_PATCH_CHARS = 6000
@@ -25,11 +27,17 @@ arquivo "{filename}" e aponte, de forma objetiva e curta (até 5 bullets):
 - sugestões de estilo/boas práticas
 
 Se não houver nada relevante, responda apenas "Sem observações relevantes.".
-
+{guidelines_block}
 Diff:
 ```
 {patch}
 ```"""
+
+_GUIDELINES_BLOCK_TEMPLATE = """
+Trechos do guia de boas práticas do time, relevantes para este arquivo \
+(use como referência, mas não repita literalmente — aplique ao avaliar o diff):
+{guidelines}
+"""
 
 
 def fetch_pr(state: PRReviewState) -> dict:
@@ -104,7 +112,7 @@ def _get_llm() -> ChatOpenAI:
             base_url=OPENROUTER_BASE_URL,
             api_key=os.environ["OPENROUTER_API_KEY"],
             temperature=0,
-            max_tokens=1024,
+            max_tokens=512,
         )
     return _llm
 
@@ -116,7 +124,8 @@ def _get_llm() -> ChatOpenAI:
     reraise=True,
 )
 def _invoke_llm_with_retry(prompt: str) -> str:
-    response = _get_llm().invoke(prompt)
+    with openrouter_semaphore:
+        response = _get_llm().invoke(prompt)
     return response.content if isinstance(response.content, str) else str(response.content)
 
 
@@ -133,7 +142,15 @@ def analyze_one_file(state: FileAnalysisInput) -> dict:
                 }
             ]
         }
-    prompt = _ANALYSIS_PROMPT.format(filename=filename, patch=patch[:MAX_PATCH_CHARS])
+    guidelines_block = ""
+    relevant = retrieve_relevant_guidelines(f"{filename}\n{patch[:1000]}", k=2)
+    if relevant:
+        formatted = "\n".join(f"- ({c.source}) {c.text[:500]}" for c in relevant)
+        guidelines_block = _GUIDELINES_BLOCK_TEMPLATE.format(guidelines=formatted)
+
+    prompt = _ANALYSIS_PROMPT.format(
+        filename=filename, patch=patch[:MAX_PATCH_CHARS], guidelines_block=guidelines_block
+    )
     try:
         content = _invoke_llm_with_retry(prompt)
     except Exception as exc:  # noqa: BLE001 — fallback deliberado: 1 falha não derruba o PR inteiro

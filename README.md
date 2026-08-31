@@ -70,6 +70,28 @@ com um Personal Access Token de escopo de leitura (`GITHUB_TOKEN`). Busca:
 Essa é uma chamada real à API — não simulada — e é o que alimenta a análise
 do LLM.
 
+## Contexto e memória
+
+Duas camadas de memória, complementares:
+
+**1. Checkpointer (estado da execução)** — o grafo é compilado com
+`checkpointer=MemorySaver()` (`agent/graph.py`) e cada execução usa
+`thread_id = "{owner}/{repo}#{pr_number}"`. Isso permite inspecionar ou
+retomar o estado de uma revisão específica pelo identificador do PR — é a
+"memória de curto prazo" da execução em si (arquivos já buscados,
+análises já concluídas).
+
+**2. RAG sobre um guia de boas práticas** (`agent/memory.py`) — cada
+análise de arquivo recupera trechos relevantes de um pequeno guia de code
+review antes de chamar o LLM, para fundamentar a revisão em padrões reais
+do time em vez de conhecimento genérico do modelo:
+
+- **Base**: 3 arquivos Markdown em [`docs/guidelines/`](docs/guidelines/) — backend (.NET), frontend (TypeScript/React) e segurança transversal.
+- **Chunking**: cada arquivo é dividido por seção (`## `), sem overlap — as seções já são curtas e coesas.
+- **Indexação**: embeddings via `openai/text-embedding-3-small`, servidos pela mesma OpenRouter usada para o LLM de análise; guardados em memória do processo (sem banco vetorial em disco — a base tem ~14 chunks, não justifica Chroma/FAISS neste escopo).
+- **Recuperação**: similaridade de cosseno (implementação própria, sem dependência extra) entre a consulta (nome do arquivo + início do diff) e os chunks indexados; top-2 por arquivo analisado.
+- Se a recuperação falhar (rede, sem créditos, etc.), a análise segue sem o contexto de guideline em vez de derrubar a execução — mesmo princípio de fallback usado nas chamadas ao LLM e ao GitHub.
+
 ## Modelo de linguagem
 
 Claude Haiku 4.5 (Anthropic), acessado via [OpenRouter](https://openrouter.ai)
@@ -174,6 +196,21 @@ O relatório completo gerado nesse teste está em
   execuções consistentemente limpas. Isso também acabou virando evidência
   real (não simulada) do fallback descrito em
   [Observabilidade e resiliência](#observabilidade-e-resiliência).
+- **Semáforo dedicado para chamadas à OpenRouter (`agent/rate_limit.py`)**:
+  ao adicionar o RAG, cada análise de arquivo passou a fazer 2 chamadas de
+  rede (embedding + chat), dobrando a concorrência efetiva e voltando a
+  estourar o orçamento *in-flight*. Em vez de reduzir `MAX_CONCURRENCY` do
+  grafo (o que reduziria o paralelismo real que queríamos demonstrar),
+  isolamos a limitação no nível certo: um `threading.Semaphore(1)`
+  serializa só as chamadas de saída à OpenRouter, enquanto o LangGraph
+  continua despachando os nós em paralelo. É a separação que se espera em
+  produção entre "paralelismo da aplicação" e "limite de rate do
+  provedor".
+- **`max_tokens` reduzido de 1024 para 512**: durante os testes, a conta
+  gratuita da OpenRouter esgotou o saldo (ver
+  [Limitações](#limitações)); reduzir o teto de tokens por chamada é
+  compatível com o que é pedido (até 5 bullets) e reduz o custo por
+  análise.
 
 ## Limitações
 
@@ -189,3 +226,9 @@ O relatório completo gerado nesse teste está em
   (efeito esperado do fan-out paralelo via `Send`).
 - Sem testes automatizados (fora do escopo do mini-projeto — adicionados no
   M2, ver [QA com IA](#qa-observabilidade-e-devops)).
+- A conta de desenvolvimento na OpenRouter é *free tier*, com orçamento de
+  créditos e de requisições *in-flight* baixo — durante o desenvolvimento
+  do M2 esse saldo se esgotou após testes repetidos, e chamadas passaram a
+  falhar com `402` mesmo de forma serializada. O fallback por arquivo
+  evita que isso derrube a execução inteira, mas em produção seria
+  necessário um plano pago ou outro provedor.
