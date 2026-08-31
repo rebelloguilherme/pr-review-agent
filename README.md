@@ -269,6 +269,22 @@ Comportamento esperado e testado (`tests/test_security.py`):
 - `post_comment` **recusa publicar o relatório**, mesmo que o comando tenha sido rodado com `--approve` — o guardrail de segurança tem prioridade sobre a aprovação humana (ver [Segurança e governança](#segurança-e-governança)).
 - O relatório final mostra o alerta de segurança de forma explícita, para quem for revisar saber exatamente o que aconteceu.
 
+## QA, observabilidade e DevOps
+
+**Testes automatizados** (28 casos, `pytest tests/ -v`):
+
+| Arquivo | Tipo | Cobre |
+|---|---|---|
+| `tests/test_github_tool.py` | Unidade | Tool GitHub com HTTP mockado — sucesso, 404, 401, retry em 500, paginação, publicação de comentário |
+| `tests/test_security.py` | Unidade + integração | Detecção de injection, redação de segredos, gating de `post_comment` |
+| `tests/test_graph_e2e.py` | **Integração/E2E** | Grafo completo (`build_graph().invoke(...)`) fim a fim: fluxo principal com paralelismo real via `Send`, dry-run vs. `--approve`, cenário de risco (erro do GitHub) e cenário adversarial (prompt injection bloqueando publicação mesmo aprovada) |
+
+**Priorização de testes**: justificada em [`docs/qa/priorizacao-testes.md`](docs/qa/priorizacao-testes.md) — o teste mais prioritário é o de governança de segurança (`TestPostCommentGovernance`), por critério de impacto de falha, não de frequência de uso.
+
+**Code review com IA sobre uma alteração real**: usamos o próprio agente para revisar o PR que introduziu o RAG (`#2`) e encontramos um bug real de concorrência em `agent/memory.py` (client de embeddings instanciado fora de lock), corrigido em seguida — ver [`docs/qa/code-review-memoria-rag.md`](docs/qa/code-review-memoria-rag.md). É um caso genuinamente meta: um agente de revisão de PR revisando o próprio código.
+
+**Bug real encontrado por um teste durante o desenvolvimento**: o primeiro rascunho do retry em `agent/github_tool.py` verificava status HTTP transitório (429/5xx) *fora* da função decorada com `@retry`, então o retry nunca era efetivamente acionado por esses códigos — só por exceções de rede. `tests/test_github_tool.py::test_fetch_pr_metadata_retries_on_500_then_succeeds` pegou isso antes de virar um problema em produção; a correção moveu a checagem para dentro de `_get`/`_post` (ver comentário em `agent/github_tool.py::_raise_if_transient`).
+
 ## Decisões tomadas
 
 - **LangGraph com 4 nós** em vez de uma cadeia linear, para poder desviar

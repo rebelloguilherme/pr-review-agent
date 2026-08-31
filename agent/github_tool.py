@@ -36,20 +36,35 @@ def _retrying():
     )
 
 
+def _raise_if_transient(resp: requests.Response, url: str) -> None:
+    """Levanta GitHubTransientError para status transitório (429/5xx) —
+    precisa acontecer DENTRO da função decorada com @_retrying() (_get /
+    _post), não depois: o tenacity só vê exceções levantadas dentro da
+    própria chamada que ele envolve. Um bug real do primeiro rascunho
+    (verificação feita em fetch_pr_metadata, fora do retry) foi pego por
+    tests/test_github_tool.py::test_fetch_pr_metadata_retries_on_500_then_succeeds."""
+    if resp.status_code == 429 or resp.status_code >= 500:
+        raise GitHubTransientError(f"GitHub retornou HTTP {resp.status_code} em {url}, tentando de novo.")
+
+
 @_retrying()
 def _get(url: str, token: str, params: dict | None = None) -> requests.Response:
     try:
-        return requests.get(url, headers=_headers(token), params=params, timeout=REQUEST_TIMEOUT)
+        resp = requests.get(url, headers=_headers(token), params=params, timeout=REQUEST_TIMEOUT)
     except (requests.Timeout, requests.ConnectionError) as exc:
         raise GitHubTransientError(f"Falha de rede ao chamar {url}: {exc}") from exc
+    _raise_if_transient(resp, url)
+    return resp
 
 
 @_retrying()
 def _post(url: str, token: str, json_body: dict) -> requests.Response:
     try:
-        return requests.post(url, headers=_headers(token), json=json_body, timeout=REQUEST_TIMEOUT)
+        resp = requests.post(url, headers=_headers(token), json=json_body, timeout=REQUEST_TIMEOUT)
     except (requests.Timeout, requests.ConnectionError) as exc:
         raise GitHubTransientError(f"Falha de rede ao chamar {url}: {exc}") from exc
+    _raise_if_transient(resp, url)
+    return resp
 
 
 def fetch_pr_metadata(owner: str, repo: str, pr_number: int, token: str) -> dict:
@@ -62,8 +77,6 @@ def fetch_pr_metadata(owner: str, repo: str, pr_number: int, token: str) -> dict
         )
     if resp.status_code in (401, 403):
         raise GitHubAPIError("Token do GitHub inválido ou sem permissão para este repositório.")
-    if resp.status_code == 429 or resp.status_code >= 500:
-        raise GitHubTransientError(f"GitHub retornou HTTP {resp.status_code}, tentando de novo.")
     if not resp.ok:
         raise GitHubAPIError(f"Erro ao buscar PR: HTTP {resp.status_code} - {resp.text[:200]}")
     return resp.json()
@@ -75,8 +88,6 @@ def fetch_pr_files(owner: str, repo: str, pr_number: int, token: str) -> list[di
     page = 1
     while True:
         resp = _get(url, token, params={"per_page": 100, "page": page})
-        if resp.status_code == 429 or resp.status_code >= 500:
-            raise GitHubTransientError(f"GitHub retornou HTTP {resp.status_code}, tentando de novo.")
         if not resp.ok:
             raise GitHubAPIError(
                 f"Erro ao buscar arquivos do PR: HTTP {resp.status_code} - {resp.text[:200]}"
@@ -98,8 +109,6 @@ def post_pr_comment(owner: str, repo: str, pr_number: int, body: str, token: str
     uma decisão do LLM."""
     url = f"{GITHUB_API_URL}/repos/{owner}/{repo}/issues/{pr_number}/comments"
     resp = _post(url, token, {"body": body})
-    if resp.status_code == 429 or resp.status_code >= 500:
-        raise GitHubTransientError(f"GitHub retornou HTTP {resp.status_code}, tentando de novo.")
     if not resp.ok:
         raise GitHubAPIError(
             f"Erro ao publicar comentário: HTTP {resp.status_code} - {resp.text[:200]}"
